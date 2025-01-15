@@ -2,8 +2,23 @@ import { DashboardLayout } from "@/components/dashboard/DashboardLayout";
 import { UploadSection } from "@/components/dashboard/UploadSection";
 import { StatusTimeline } from "@/components/dashboard/StatusTimeline";
 import { RecentInvoices } from "@/components/dashboard/RecentInvoices";
+import { useQuery } from "@tanstack/react-query";
+import { supabase } from "@/integrations/supabase/client";
 
 const Index = () => {
+  const { data: analyticsData } = useQuery({
+    queryKey: ['analytics'],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('analytics_data')
+        .select('*')
+        .single();
+      
+      if (error) throw error;
+      return data;
+    },
+  });
+
   return (
     <DashboardLayout>
       <div className="space-y-6">
@@ -16,7 +31,7 @@ const Index = () => {
         
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <UploadSection />
-          <StatusTimeline />
+          <StatusTimeline analyticsData={analyticsData} />
         </div>
         
         <RecentInvoices />
