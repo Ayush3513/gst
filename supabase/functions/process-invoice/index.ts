@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import "https://deno.land/x/xhr@0.1.0/mod.ts"
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -23,41 +24,41 @@ serve(async (req) => {
     const buffer = await file.arrayBuffer()
     const base64 = btoa(String.fromCharCode(...new Uint8Array(buffer)))
 
-    // Process with GPT-4 Vision
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    // Process with GROQ
+    const response = await fetch('https://api.groq.com/v1/chat/completions', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${Deno.env.get('OPENAI_API_KEY')}`,
+        'Authorization': `Bearer ${Deno.env.get('GROQ_API_KEY')}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini",
+        model: "llama2-70b-4096",
         messages: [
           {
             role: "system",
-            content: "You are an expert at extracting information from invoices. Extract the following fields: supplier_name, invoice_number, amount, invoice_date, gst_amount. Return the data in JSON format."
+            content: "You are an expert at extracting information from invoices. Extract the following fields: supplier_name, invoice_number, amount, invoice_date, gst_amount. Return the data in a valid JSON format with these exact field names. The amount and gst_amount should be numbers, invoice_date should be in YYYY-MM-DD format."
           },
           {
             role: "user",
-            content: [
-              {
-                type: "text",
-                text: "Please extract the invoice information from this image."
-              },
-              {
-                type: "image_url",
-                image_url: {
-                  url: `data:${file.type};base64,${base64}`
-                }
-              }
-            ]
+            content: `Please extract the invoice information from this image: data:${file.type};base64,${base64}`
           }
-        ]
+        ],
+        temperature: 0.1,
+        max_tokens: 1024,
       })
     })
 
+    if (!response.ok) {
+      const error = await response.text()
+      console.error('GROQ API Error:', error)
+      throw new Error('Failed to process invoice with GROQ')
+    }
+
     const data = await response.json()
+    console.log('GROQ Response:', data)
+
     const extractedData = JSON.parse(data.choices[0].message.content)
+    console.log('Extracted Data:', extractedData)
 
     // Store in Supabase
     const supabase = createClient(
@@ -76,13 +77,17 @@ serve(async (req) => {
         status: 'Processing'
       }])
 
-    if (insertError) throw insertError
+    if (insertError) {
+      console.error('Supabase Insert Error:', insertError)
+      throw insertError
+    }
 
     return new Response(
       JSON.stringify({ success: true, data: extractedData }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
   } catch (error) {
+    console.error('Processing Error:', error)
     return new Response(
       JSON.stringify({ error: error.message }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
