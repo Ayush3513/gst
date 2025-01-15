@@ -24,6 +24,8 @@ serve(async (req) => {
     const buffer = await file.arrayBuffer()
     const base64 = btoa(String.fromCharCode(...new Uint8Array(buffer)))
 
+    console.log('Processing file:', file.name)
+
     // Process with GROQ
     const response = await fetch('https://api.groq.com/v1/chat/completions', {
       method: 'POST',
