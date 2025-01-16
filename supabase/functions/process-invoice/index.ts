@@ -39,13 +39,26 @@ serve(async (req) => {
         base64Image: `data:${file.type};base64,${base64}`,
         language: 'eng',
         isOverlayRequired: false,
+        scale: true,
+        detectOrientation: true,
       }),
     })
 
-    const ocrData = await ocrResponse.json()
-    console.log('OCR Response received:', ocrData)
+    if (!ocrResponse.ok) {
+      console.error('OCR API Error:', await ocrResponse.text())
+      throw new Error('OCR API request failed')
+    }
 
-    if (!ocrData.ParsedResults?.[0]?.ParsedText) {
+    const ocrData = await ocrResponse.json()
+    console.log('OCR Response received:', JSON.stringify(ocrData))
+
+    if (!ocrData.ParsedResults || ocrData.ParsedResults.length === 0) {
+      console.error('No parsed results in OCR response:', ocrData)
+      throw new Error('No text could be extracted from the image')
+    }
+
+    if (!ocrData.ParsedResults[0].ParsedText) {
+      console.error('No parsed text in OCR response:', ocrData.ParsedResults[0])
       throw new Error('Failed to extract text from image')
     }
 
@@ -65,6 +78,14 @@ serve(async (req) => {
       const amount = text.match(amountPattern)?.[1]?.replace(/,/g, '') || '0'
       const gstAmount = text.match(gstPattern)?.[1]?.replace(/,/g, '') || '0'
       const supplierName = text.match(supplierPattern)?.[1]?.trim() || 'Unknown Supplier'
+
+      console.log('Extracted data:', {
+        invoiceNumber,
+        dateMatch,
+        amount,
+        gstAmount,
+        supplierName
+      })
 
       let invoiceDate = new Date()
       if (dateMatch) {
@@ -89,7 +110,7 @@ serve(async (req) => {
     }
 
     const extractedData = extractData(text)
-    console.log('Extracted data:', extractedData)
+    console.log('Final extracted data:', extractedData)
 
     // Initialize Supabase client
     const supabase = createClient(
@@ -154,7 +175,8 @@ serve(async (req) => {
     console.error('Processing Error:', error)
     return new Response(
       JSON.stringify({ 
-        error: error.message 
+        error: error.message,
+        details: error.stack
       }),
       { 
         headers: { 
