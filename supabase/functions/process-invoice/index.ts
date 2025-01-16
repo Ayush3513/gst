@@ -20,13 +20,14 @@ serve(async (req) => {
       throw new Error('No file provided')
     }
 
+    console.log('Starting to process file:', file.name)
+
     // Convert file to base64
     const buffer = await file.arrayBuffer()
     const base64 = btoa(String.fromCharCode(...new Uint8Array(buffer)))
 
-    console.log('Processing file:', file.name)
-
     // Process with GROQ
+    console.log('Sending request to GROQ API')
     const response = await fetch('https://api.groq.com/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -38,11 +39,18 @@ serve(async (req) => {
         messages: [
           {
             role: "system",
-            content: "You are an expert at extracting information from invoices. Extract the following fields: supplier_name, invoice_number, amount, invoice_date, gst_amount. Return the data in a valid JSON format with these exact field names. The amount and gst_amount should be numbers, invoice_date should be in YYYY-MM-DD format."
+            content: `You are an expert at extracting information from invoices. Extract the following fields and return them in a valid JSON format:
+              - supplier_name: The name of the supplier/vendor
+              - invoice_number: The unique invoice identifier
+              - amount: The total invoice amount (as a number)
+              - invoice_date: The date of the invoice (in YYYY-MM-DD format)
+              - gst_amount: The GST/tax amount (as a number)
+              
+              Return ONLY the JSON object with these exact field names, nothing else.`
           },
           {
             role: "user",
-            content: `Please extract the invoice information from this image: data:${file.type};base64,${base64}`
+            content: `Extract the invoice information from this image: data:${file.type};base64,${base64}`
           }
         ],
         temperature: 0.1,
@@ -51,24 +59,24 @@ serve(async (req) => {
     })
 
     if (!response.ok) {
-      const error = await response.text()
-      console.error('GROQ API Error:', error)
+      console.error('GROQ API Error:', await response.text())
       throw new Error('Failed to process invoice with GROQ')
     }
 
-    const data = await response.json()
-    console.log('GROQ Response:', data)
+    const groqData = await response.json()
+    console.log('GROQ Response received:', groqData)
 
-    const extractedData = JSON.parse(data.choices[0].message.content)
-    console.log('Extracted Data:', extractedData)
+    const extractedData = JSON.parse(groqData.choices[0].message.content)
+    console.log('Parsed extracted data:', extractedData)
 
-    // Store in Supabase
+    // Initialize Supabase client
     const supabase = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     )
 
-    const { error: insertError } = await supabase
+    // Insert invoice data
+    const { error: invoiceError } = await supabase
       .from('invoices')
       .insert([{
         supplier_name: extractedData.supplier_name,
@@ -79,20 +87,64 @@ serve(async (req) => {
         status: 'Processing'
       }])
 
-    if (insertError) {
-      console.error('Supabase Insert Error:', insertError)
-      throw insertError
+    if (invoiceError) {
+      console.error('Invoice insertion error:', invoiceError)
+      throw invoiceError
     }
 
+    // Update analytics data
+    const { data: currentAnalytics } = await supabase
+      .from('analytics_data')
+      .select('*')
+      .single()
+
+    const newTotalAmount = (currentAnalytics?.total_itc_amount || 0) + extractedData.gst_amount
+    const newVerifiedAmount = (currentAnalytics?.verified_itc_amount || 0)
+
+    const { error: analyticsError } = await supabase
+      .from('analytics_data')
+      .upsert({
+        id: currentAnalytics?.id || crypto.randomUUID(),
+        total_itc_amount: newTotalAmount,
+        verified_itc_amount: newVerifiedAmount,
+        gstr1_status: 'Pending',
+        gstr2b_status: 'Pending',
+        last_updated: new Date().toISOString()
+      })
+
+    if (analyticsError) {
+      console.error('Analytics update error:', analyticsError)
+      throw analyticsError
+    }
+
+    console.log('Successfully processed invoice and updated analytics')
+
     return new Response(
-      JSON.stringify({ success: true, data: extractedData }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      JSON.stringify({ 
+        success: true, 
+        data: extractedData
+      }),
+      { 
+        headers: { 
+          ...corsHeaders, 
+          'Content-Type': 'application/json' 
+        } 
+      }
     )
+
   } catch (error) {
     console.error('Processing Error:', error)
     return new Response(
-      JSON.stringify({ error: error.message }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
+      JSON.stringify({ 
+        error: error.message 
+      }),
+      { 
+        headers: { 
+          ...corsHeaders, 
+          'Content-Type': 'application/json' 
+        }, 
+        status: 400 
+      }
     )
   }
 })
