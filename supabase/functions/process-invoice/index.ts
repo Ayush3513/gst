@@ -20,13 +20,23 @@ serve(async (req) => {
       throw new Error('No file uploaded')
     }
 
-    console.log('File received:', file.name)
+    console.log('File received:', file.name, 'Type:', file.type)
 
     // Convert file to base64
     const buffer = await file.arrayBuffer()
     const base64 = btoa(String.fromCharCode(...new Uint8Array(buffer)))
 
-    console.log('Sending to OCR.space API...')
+    // Determine file type for OCR API
+    let fileType
+    if (file.type.includes('pdf')) {
+      fileType = 'PDF'
+    } else if (file.type.includes('image')) {
+      fileType = 'Auto'
+    } else {
+      throw new Error('Unsupported file type. Please upload a PDF or image file.')
+    }
+
+    console.log('Sending to OCR.space API with file type:', fileType)
     
     // Call OCR.space API
     const ocrResponse = await fetch('https://api.ocr.space/parse/image', {
@@ -41,6 +51,8 @@ serve(async (req) => {
         isOverlayRequired: false,
         scale: true,
         detectOrientation: true,
+        filetype: fileType,
+        OCREngine: 2, // More accurate OCR engine
       }),
     })
 
