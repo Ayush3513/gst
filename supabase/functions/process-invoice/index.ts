@@ -1,6 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
-import "https://deno.land/x/xhr@0.1.0/mod.ts"
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1'
+import { createWorker } from 'https://esm.sh/tesseract.js@5.0.4'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -13,61 +13,71 @@ serve(async (req) => {
   }
 
   try {
+    console.log('Starting invoice processing...')
     const formData = await req.formData()
     const file = formData.get('file')
 
     if (!file) {
-      throw new Error('No file provided')
+      throw new Error('No file uploaded')
     }
 
-    console.log('Starting to process file:', file.name)
+    console.log('File received:', file.name)
 
     // Convert file to base64
     const buffer = await file.arrayBuffer()
     const base64 = btoa(String.fromCharCode(...new Uint8Array(buffer)))
 
-    // Process with GROQ
-    console.log('Sending request to GROQ API')
-    const response = await fetch('https://api.groq.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${Deno.env.get('GROQ_API_KEY')}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: "llama2-70b-4096",
-        messages: [
-          {
-            role: "system",
-            content: `You are an expert at extracting information from invoices. Extract the following fields and return them in a valid JSON format:
-              - supplier_name: The name of the supplier/vendor
-              - invoice_number: The unique invoice identifier
-              - amount: The total invoice amount (as a number)
-              - invoice_date: The date of the invoice (in YYYY-MM-DD format)
-              - gst_amount: The GST/tax amount (as a number)
-              
-              Return ONLY the JSON object with these exact field names, nothing else.`
-          },
-          {
-            role: "user",
-            content: `Extract the invoice information from this image: data:${file.type};base64,${base64}`
-          }
-        ],
-        temperature: 0.1,
-        max_tokens: 1024,
-      })
-    })
+    console.log('Starting OCR processing...')
+    
+    // Initialize Tesseract worker
+    const worker = await createWorker()
+    await worker.loadLanguage('eng')
+    await worker.initialize('eng')
 
-    if (!response.ok) {
-      console.error('GROQ API Error:', await response.text())
-      throw new Error('Failed to process invoice with GROQ')
+    // Perform OCR
+    const { data: { text } } = await worker.recognize(`data:${file.type};base64,${base64}`)
+    await worker.terminate()
+
+    console.log('OCR Text extracted:', text)
+
+    // Extract invoice data using regex patterns
+    const extractData = (text: string) => {
+      const invoiceNumberPattern = /(?:invoice|bill)(?:\s+)?(?:no|number|#)?[:.]?\s*([A-Za-z0-9-]+)/i
+      const datePattern = /(?:\d{1,2}[-/]\d{1,2}[-/]\d{2,4})|(?:\d{2,4}[-/]\d{1,2}[-/]\d{1,2})/
+      const amountPattern = /(?:total|amount|sum)(?:\s+)?(?:rs|inr)?(?:\s+)?[:.]?\s*(?:rs\.?|₹)?(?:\s+)?(\d+(?:,\d+)*(?:\.\d{2})?)/i
+      const gstPattern = /(?:gst|tax)(?:\s+)?(?:amount)?(?:\s+)?[:.]?\s*(?:rs\.?|₹)?(?:\s+)?(\d+(?:,\d+)*(?:\.\d{2})?)/i
+      const supplierPattern = /(?:from|supplier|vendor|billed\s+by)(?:\s+)?[:.]?\s*([A-Za-z\s]+(?:pvt\.?\s+ltd\.?|limited|inc\.?|corporation)?)/i
+
+      const invoiceNumber = text.match(invoiceNumberPattern)?.[1] || 'INV' + Date.now()
+      const dateMatch = text.match(datePattern)?.[0]
+      const amount = text.match(amountPattern)?.[1]?.replace(/,/g, '') || '0'
+      const gstAmount = text.match(gstPattern)?.[1]?.replace(/,/g, '') || '0'
+      const supplierName = text.match(supplierPattern)?.[1]?.trim() || 'Unknown Supplier'
+
+      let invoiceDate = new Date()
+      if (dateMatch) {
+        const parts = dateMatch.split(/[-/]/)
+        if (parts.length === 3) {
+          // Assuming date format is DD-MM-YYYY or YYYY-MM-DD
+          if (parts[0].length === 4) {
+            invoiceDate = new Date(parts[0], parseInt(parts[1]) - 1, parseInt(parts[2]))
+          } else {
+            invoiceDate = new Date(parts[2], parseInt(parts[1]) - 1, parseInt(parts[0]))
+          }
+        }
+      }
+
+      return {
+        invoice_number: invoiceNumber,
+        invoice_date: invoiceDate.toISOString().split('T')[0],
+        amount: parseFloat(amount),
+        gst_amount: parseFloat(gstAmount),
+        supplier_name: supplierName
+      }
     }
 
-    const groqData = await response.json()
-    console.log('GROQ Response received:', groqData)
-
-    const extractedData = JSON.parse(groqData.choices[0].message.content)
-    console.log('Parsed extracted data:', extractedData)
+    const extractedData = extractData(text)
+    console.log('Extracted data:', extractedData)
 
     // Initialize Supabase client
     const supabase = createClient(
@@ -79,11 +89,7 @@ serve(async (req) => {
     const { error: invoiceError } = await supabase
       .from('invoices')
       .insert([{
-        supplier_name: extractedData.supplier_name,
-        invoice_number: extractedData.invoice_number,
-        amount: extractedData.amount,
-        invoice_date: extractedData.invoice_date,
-        gst_amount: extractedData.gst_amount,
+        ...extractedData,
         status: 'Processing'
       }])
 
