@@ -1,6 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1'
-import { createWorker } from 'https://esm.sh/tesseract.js@5.0.4'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -27,18 +26,31 @@ serve(async (req) => {
     const buffer = await file.arrayBuffer()
     const base64 = btoa(String.fromCharCode(...new Uint8Array(buffer)))
 
-    console.log('Starting OCR processing...')
+    console.log('Sending to OCR.space API...')
     
-    // Initialize Tesseract worker
-    const worker = await createWorker()
-    await worker.loadLanguage('eng')
-    await worker.initialize('eng')
+    // Call OCR.space API
+    const ocrResponse = await fetch('https://api.ocr.space/parse/image', {
+      method: 'POST',
+      headers: {
+        'apikey': Deno.env.get('OCR_SPACE_API_KEY') || '',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        base64Image: `data:${file.type};base64,${base64}`,
+        language: 'eng',
+        isOverlayRequired: false,
+      }),
+    })
 
-    // Perform OCR
-    const { data: { text } } = await worker.recognize(`data:${file.type};base64,${base64}`)
-    await worker.terminate()
+    const ocrData = await ocrResponse.json()
+    console.log('OCR Response received:', ocrData)
 
-    console.log('OCR Text extracted:', text)
+    if (!ocrData.ParsedResults?.[0]?.ParsedText) {
+      throw new Error('Failed to extract text from image')
+    }
+
+    const text = ocrData.ParsedResults[0].ParsedText
+    console.log('Extracted text:', text)
 
     // Extract invoice data using regex patterns
     const extractData = (text: string) => {
